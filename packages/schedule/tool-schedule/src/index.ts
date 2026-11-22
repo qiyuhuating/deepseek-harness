@@ -375,6 +375,40 @@ function registerScheduleTools(ctx: Context): void {
   // Plugin configuration is fixed for the life of the Host service, so the description is read once.
   const targetDescription = targetHelp(ctx.schedule.deliveryLimits().newSessionIntervalSeconds)
 
+  if (process.env.DSH_PI_SESSION_DIR)
+    ctx.tools.register(
+      defineTool({
+        name: 'axiom_schedule_create',
+        description:
+          'Schedule workflow steps in this conversation using a five-field cron expression and IANA timezone.',
+        parameters: {
+          label: { type: 'string', required: true },
+          steps: { type: 'array', items: { type: 'string' }, required: true },
+          cron: { type: 'string', required: true },
+          timezone: { type: 'string', required: true },
+        },
+        output: { schema: CREATE_OUTPUT_SCHEMA, render: renderValue },
+        execute({ label, steps, cron, timezone }, exec) {
+          if (!steps.length || steps.length > 30 || steps.some((s) => !s.trim() || s.length > 50000))
+            throw Error('Invalid workflow steps')
+          return runForCaller(exec, CREATE_ERRORS, (agent) =>
+            ctx.schedule
+              .create(
+                {
+                  title: label,
+                  prompt: steps.join('\n\n'),
+                  timing: { kind: 'cron', cron: { expression: cron, time_zone: timezone } },
+                  target: targetFor(agent, 'this_session'),
+                },
+                agent.session.id,
+                exec.signal,
+              )
+              .then(modelTask),
+          )
+        },
+      }),
+    )
+
   ctx.tools.register(defineTool({
     name: 'schedule_create',
     description: CREATE_DESCRIPTION,

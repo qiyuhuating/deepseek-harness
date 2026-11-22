@@ -19,7 +19,8 @@ import type {
   RequestErrorAction,
 } from '@deepseek-ai/dsh-agent'
 import { AgentModel, agentEvents, assembleContextFor } from '@deepseek-ai/dsh-agent'
-import type { GenerateOptions, LlmCallConfig, Message, PreparedLlmCall } from '@deepseek-ai/dsh-llm'
+import { brandString } from '@deepseek-ai/dsh-brand'
+import type { GenerateOptions, LlmCallConfig, Message, PreparedLlmCall, ToolCallId } from '@deepseek-ai/dsh-llm'
 import {
   LlmError,
   createAssistantMessage,
@@ -434,6 +435,101 @@ export class ReactLoopAgent implements Agent {
     const { turn, step, abort: { signal } } = this.phase
     signal.throwIfAborted()
 
+    if (process.env.DSH_PI_SESSION_DIR) {
+      const { runPiTurn } = await import('./pi-turn.ts')
+      const messages = decision.messages.filter((m) => m.source.kind !== 'runtime-context')
+      const prompt = messages
+        .map((m) =>
+          m.content
+            .map((b) => {
+              if (b.type !== 'text') throw Error('Pi turn requires a text message')
+              return b.text
+            })
+            .join(''),
+        )
+        .join('\n')
+      for (const m of messages) this.session.append('user/message', m, { surfaceOp: 'append' })
+      const live = new AssistantStreamAttempt(
+        this.session.id,
+        ++this.assistantAttemptCounter,
+        () => ++this.assistantStreamRevision,
+        turn,
+        step,
+        (frame) => this.dispatch.emit('agent/assistant-stream', { frame }),
+      )
+      let text = ''
+      live.start()
+      live.push({ type: 'block-start', index: 0, blockType: 'text' })
+      try {
+        await runPiTurn({
+          directory: process.env.DSH_PI_SESSION_DIR,
+          id: this.session.id,
+          provider: decision.selection.provider,
+          model: decision.selection.model,
+          prompt,
+          signal,
+          text: (delta) => {
+            text += delta
+            live.push({ type: 'text-delta', index: 0, text: delta })
+          },
+          tools: this.loopCtx.tools
+            .schemas(this, decision.toolSet)
+            .filter((t) =>
+              [
+                'read',
+                'job_history',
+                'axiom_schedule_create',
+                'schedule_list',
+                'schedule_view',
+                'schedule_edit',
+              ].includes(t.name),
+            ),
+          execute: async (id, name, args) => {
+            const result = await this.loopCtx.tools.execute({
+              agent: this,
+              toolSet: decision.toolSet,
+              signal,
+              calls: [
+                { type: 'tool-call', id: brandString<ToolCallId>(id), name, arguments: JSON.stringify(args) },
+              ],
+            })
+            const output = result.results[0]?.result
+            if (!output || output.isError)
+              throw Error(
+                output?.content.map((b) => (b.type === 'text' ? b.text : '')).join('') || 'Harness tool failed',
+              )
+            return output.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n')
+          },
+        })
+      } finally {
+        live.push({ type: 'block-end', index: 0, block: { type: 'text', text } })
+        if (text)
+          live.settle(
+            'assistant/message',
+            () =>
+              this.session.append(
+                'assistant/message',
+                {
+                  turn,
+                  step,
+                  message: createAssistantMessage({
+                    content: [{ type: 'text', text }],
+                    source: { provider: decision.selection.provider, model: decision.selection.model },
+                  }),
+                  stream: live.stream,
+                  ...(signal.aborted ? { interrupted: true } : {}),
+                },
+                { surfaceOp: 'append' },
+              ).seq,
+          )
+        else
+          live.settle(
+            'assistant/attempt',
+            () => this.session.append('assistant/attempt', { turn, step, stream: live.stream }).seq,
+          )
+      }
+      return { kind: 'completed' }
+    }
     const { assembly } = decision
     let firstAttempt = true
     while (true) {

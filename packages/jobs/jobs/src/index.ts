@@ -120,6 +120,9 @@ export abstract class JobRegistry extends Service {
    */
   abstract list(caller?: SessionId): JobView[]
 
+  /** Durable Axiom history in Pi deployments. Caller identity comes from the tool scope. */
+  historyPage?: (caller: SessionId | undefined, cursor: string | undefined, limit: number) => string
+
   /**
    * Project one job without changing its cursor. Throws for an unknown or
    * foreign job.

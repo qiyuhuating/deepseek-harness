@@ -10,6 +10,7 @@
  * @module @deepseek-ai/dsh-jobs-local
  */
 
+import { JobHistory } from './history.ts'
 import { randomUUID } from 'node:crypto'
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
@@ -169,6 +170,8 @@ export class LocalJobRegistry extends JobRegistry {
   private readonly settledRetainBytes: number
   /** Schemastery-defaulted pull-source poll interval. */
   private readonly pumpPollMs: number
+  private readonly history?: JobHistory
+  private historyError?: Error
   private store = new Map<JobId, TrackedJob>()
   /**
    * Controllers and scoped subscriptions layered by the scope that registered
@@ -198,6 +201,13 @@ export class LocalJobRegistry extends JobRegistry {
     this.retainBytes = resolved.retainBytes
     this.settledRetainBytes = resolved.settledRetainBytes
     this.pumpPollMs = resolved.pumpPollMs
+    if (process.env.DSH_PI_SESSION_DIR) {
+      const history = this.history = new JobHistory(process.env.DSH_PI_SESSION_DIR)
+      this.historyPage = (caller, cursor, limit) => {
+        if (this.historyError) throw this.historyError
+        return history.page(caller ?? '', cursor, limit)
+      }
+    }
     this.selfCtx = ctx
     this.hub = new JobEventHub(this.layers, (message) => { ctx.logger.warn(message) })
     ctx.effect(() => () => this.disposeAll(), 'jobs teardown')
@@ -453,6 +463,15 @@ export class LocalJobRegistry extends JobRegistry {
   }
 
   private emit(event: JobEvent, owner: Agent | undefined): void {
+    if (this.history && !this.historyError && (event.type === 'registered' || event.type === 'stopping' || event.type === 'settled')) {
+      try {
+        this.history.save(owner?.id ?? '', event.job)
+      } catch (cause) {
+        // The producer already owns a running job. Keep its cancellation and settlement paths alive.
+        this.historyError = new Error('Job history write failed; check storage and restart the host', { cause })
+        this.selfCtx.logger.error(this.historyError)
+      }
+    }
     this.hub.emit(event, owner)
   }
 
@@ -701,6 +720,7 @@ export class LocalJobRegistry extends JobRegistry {
     const ownerCleanups = [...this.ownerCleanups.values()]
     this.ownerCleanups.clear()
     await Promise.all(ownerCleanups.map(cleanup => Promise.resolve(cleanup())))
+    this.history?.close()
   }
 
   /**
