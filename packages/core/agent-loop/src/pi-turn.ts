@@ -14,16 +14,27 @@ import type { ToolSchema } from '@deepseek-ai/dsh-llm'
 // A Harness agent drives one turn at a time. Keep only its completed model runtime.
 const runtimes = new WeakMap<object, { revision: string; runtime: ModelRuntime }>()
 
+async function fileRevision(path: string): Promise<string | undefined> {
+  try {
+    const file = await stat(path, { bigint: true })
+    return [file.dev, file.ino, file.ctimeNs, file.mtimeNs, file.size].join(',')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw error
+  }
+}
+
+const histories = new WeakMap<object, { directory: string; manager: WeakRef<SessionManager>; revision: string }>()
+
+async function historyRevision(directory: string, manager: SessionManager): Promise<string | undefined> {
+  const path = manager.getSessionFile()
+  if (!path) return undefined
+  const [dir, file] = await Promise.all([fileRevision(directory), fileRevision(path)])
+  return dir && file && dir + '/' + file
+}
+
 async function runtimeFor(owner: object, agentDir: string, signal: AbortSignal): Promise<ModelRuntime> {
-  const revisions = await Promise.all(['models.json', 'auth.json', 'models-store.json'].map(async name => {
-    try {
-      const file = await stat(join(agentDir, name), { bigint: true })
-      return [file.dev, file.ino, file.ctimeNs, file.mtimeNs, file.size].join(',')
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'missing'
-      throw error
-    }
-  }))
+  const revisions = await Promise.all(['models.json', 'auth.json', 'models-store.json'].map(name => fileRevision(join(agentDir, name))))
   signal.throwIfAborted()
   const revision = JSON.stringify([agentDir, process.env.PI_OFFLINE, ...revisions])
   const previous = runtimes.get(owner)
@@ -86,13 +97,21 @@ export async function runPiTurn(options: {
       }
     },
   }))
+  // Reuse only Pi's parsed history. Tool callbacks and abort listeners belong to the new session.
+  const cached = histories.get(options.owner)
+  histories.delete(options.owner)
+  const previous = cached?.manager.deref()
+  const manager = previous && cached?.directory === privateDir && cached.revision === await historyRevision(privateDir, previous)
+    ? previous
+    : SessionManager.continueRecent(privateDir, privateDir)
+  options.signal.throwIfAborted()
   const { session } = await createAgentSession({
     agentDir,
     cwd: privateDir,
     modelRuntime: runtime,
     model,
     resourceLoader: loader,
-    sessionManager: SessionManager.continueRecent(privateDir, privateDir),
+    sessionManager: manager,
     tools: customTools.map((t) => t.name),
     customTools,
   })
@@ -115,6 +134,9 @@ export async function runPiTurn(options: {
           ? (last.errorMessage ?? last.stopReason)
           : 'Pi turn ended without an assistant response',
       )
+    const revision = await historyRevision(privateDir, manager)
+    options.signal.throwIfAborted()
+    if (revision) histories.set(options.owner, { directory: privateDir, manager: new WeakRef(manager), revision })
     return last.stopReason === 'length' ? 'max-tokens' : 'completed'
   } finally {
     options.signal.removeEventListener('abort', abort)
