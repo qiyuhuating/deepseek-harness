@@ -35,12 +35,14 @@ import type { EpochHeader, RequestContext, Session, SessionId, SessionSeq, TurnE
 import { canonicalHeader, headerEquals, ToolCallRecovery } from '@deepseek-ai/dsh-session'
 import { renderContextSections } from '@deepseek-ai/dsh-system-prompt'
 import type { PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
-import { ToolActivationError, ToolBatchExecutionError } from '@deepseek-ai/dsh-tools'
+import { projectToolSchema, ToolActivationError, ToolBatchExecutionError } from '@deepseek-ai/dsh-tools'
 import type { ResolvedToolSet } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
 import { ReactLoopInbox } from './inbox.ts'
 import { RuntimeContextProjection } from './runtime-context.ts'
 import { AssistantStreamAttempt } from './assistant-stream.ts'
+
+const piToolNames = new Set(['read', 'job_history', 'axiom_schedule_create', 'schedule_list', 'schedule_view', 'schedule_edit'])
 
 /** Projected facts consumed by this driver; registration stays with the factory. */
 interface LoopProjections {
@@ -463,6 +465,7 @@ export class ReactLoopAgent implements Agent {
       live.push({ type: 'block-start', index: 0, blockType: 'text' })
       try {
         outcome = await runPiTurn({
+          owner: this,
           directory: process.env.DSH_PI_SESSION_DIR,
           id: this.session.id,
           provider: decision.selection.provider,
@@ -474,17 +477,9 @@ export class ReactLoopAgent implements Agent {
             live.push({ type: 'text-delta', index: 0, text: delta })
           },
           tools: this.loopCtx.tools
-            .schemas(this, decision.toolSet)
-            .filter((t) =>
-              [
-                'read',
-                'job_history',
-                'axiom_schedule_create',
-                'schedule_list',
-                'schedule_view',
-                'schedule_edit',
-              ].includes(t.name),
-            ),
+            .definitions(this, decision.toolSet)
+            .filter(tool => piToolNames.has(tool.name))
+            .map(tool => projectToolSchema(tool, true)),
           execute: async (id, name, args) => {
             const result = await this.loopCtx.tools.execute({
               agent: this,

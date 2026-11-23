@@ -1,3 +1,6 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
@@ -60,6 +63,43 @@ function waitForIdle(ctx: Context, agent: Agent): Promise<void> {
 function send(agent: Agent, text: string) {
   agent.followup(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }))
 }
+
+it('honors cancellation before opening Pi storage', async () => {
+  const { runPiTurn } = await import('../src/pi-turn.ts')
+  const reason = new Error('cancelled before startup')
+  await expect(runPiTurn({
+    owner: {}, directory: '\0', id: 'cancelled', provider: 'mock', model: 'mock', prompt: '',
+    signal: AbortSignal.abort(reason), tools: [], text: vi.fn(), execute: vi.fn(),
+  })).rejects.toBe(reason)
+})
+
+it('reuses model initialization only for the same agent and configuration', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'pi-runtime-'))
+  onTestFinished(() => rm(directory, { recursive: true, force: true }))
+  vi.stubEnv('PI_CODING_AGENT_DIR', directory)
+  vi.stubEnv('PI_OFFLINE', '1')
+  onTestFinished(() => { vi.unstubAllEnvs() })
+  const { ModelRuntime } = await import('@earendil-works/pi-coding-agent')
+  const { runPiTurn } = await import('../src/pi-turn.ts')
+  const create = vi.spyOn(ModelRuntime, 'create')
+  onTestFinished(() => { create.mockRestore() })
+  const owner = {}
+  const run = (agent: object) => expect(runPiTurn({
+    owner: agent, directory, id: 'runtime', provider: 'missing', model: 'missing', prompt: '',
+    signal: new AbortController().signal, tools: [], text: vi.fn(), execute: vi.fn(),
+  })).rejects.toThrow('Pi model unavailable')
+  await run(owner)
+  // Pi can materialize its credential and catalog files during the first initialization.
+  await run(owner)
+  const warmed = create.mock.calls.length
+  await run(owner)
+  expect(create).toHaveBeenCalledTimes(warmed)
+  await run({})
+  expect(create).toHaveBeenCalledTimes(warmed + 1)
+  await writeFile(join(directory, 'models.json'), '{"providers":{}}')
+  await run(owner)
+  expect(create).toHaveBeenCalledTimes(warmed + 2)
+})
 
 it('retains a failed Pi stream as an attempt without publishing its prefix as a reply', async () => {
   vi.stubEnv('DSH_PI_SESSION_DIR', 'unused-by-mocked-pi')
