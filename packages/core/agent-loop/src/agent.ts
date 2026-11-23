@@ -480,11 +480,11 @@ export class ReactLoopAgent implements Agent {
             .definitions(this, decision.toolSet)
             .filter(tool => piToolNames.has(tool.name))
             .map(tool => projectToolSchema(tool, true)),
-          execute: async (id, name, args) => {
+          execute: async (id, name, args, toolSignal) => {
             const result = await this.loopCtx.tools.execute({
               agent: this,
               toolSet: decision.toolSet,
-              signal,
+              signal: toolSignal,
               calls: [
                 { type: 'tool-call', id: brandString<ToolCallId>(id), name, arguments: JSON.stringify(args) },
               ],

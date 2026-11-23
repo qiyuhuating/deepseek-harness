@@ -28,8 +28,13 @@ async function runtimeFor(owner: object, agentDir: string, signal: AbortSignal):
   const revision = JSON.stringify([agentDir, process.env.PI_OFFLINE, ...revisions])
   const previous = runtimes.get(owner)
   if (previous?.revision === revision) return previous.runtime
-  const runtime = await ModelRuntime.create({ signal })
+  const runtime = await ModelRuntime.create({
+    signal,
+    authPath: join(agentDir, 'auth.json'),
+    modelsPath: join(agentDir, 'models.json'),
+  })
   signal.throwIfAborted()
+  if (runtime.getError()) throw Error('Pi model runtime configuration or availability failed; check the Pi model configuration')
   runtimes.set(owner, { revision, runtime })
   return runtime
 }
@@ -44,7 +49,7 @@ export async function runPiTurn(options: {
   signal: AbortSignal
   text(delta: string): void
   tools: ToolSchema[]
-  execute(id: string, name: string, args: unknown): Promise<string>
+  execute(id: string, name: string, args: unknown, signal: AbortSignal): Promise<string>
 }): Promise<'completed' | 'max-tokens'> {
   options.signal.throwIfAborted()
   const privateDir = join(options.directory, createHash('sha256').update(options.id).digest('hex'))
@@ -72,12 +77,17 @@ export async function runPiTurn(options: {
     label: name,
     description,
     parameters,
-    execute: async (id: string, args: unknown) => ({
-      content: [{ type: 'text' as const, text: await options.execute(id, name, args) }],
-      details: undefined,
-    }),
+    execute: async (id: string, args: unknown, toolSignal?: AbortSignal) => {
+      const signal = toolSignal ? AbortSignal.any([options.signal, toolSignal]) : options.signal
+      signal.throwIfAborted()
+      return {
+        content: [{ type: 'text' as const, text: await options.execute(id, name, args, signal) }],
+        details: undefined,
+      }
+    },
   }))
   const { session } = await createAgentSession({
+    agentDir,
     cwd: privateDir,
     modelRuntime: runtime,
     model,

@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
@@ -99,6 +99,22 @@ it('reuses model initialization only for the same agent and configuration', asyn
   await writeFile(join(directory, 'models.json'), '{"providers":{}}')
   await run(owner)
   expect(create).toHaveBeenCalledTimes(warmed + 2)
+  await writeFile(join(directory, 'models.json'), '{')
+  const attempt = () => runPiTurn({
+    owner, directory, id: 'runtime', provider: 'missing', model: 'missing', prompt: '',
+    signal: new AbortController().signal, tools: [], text: vi.fn(), execute: vi.fn(),
+  })
+  await expect(attempt()).rejects.toThrow('Pi model runtime configuration or availability failed')
+  await writeFile(join(directory, 'models.json'), '{"providers":{}}')
+  await expect(attempt()).rejects.toThrow('Pi model unavailable')
+  for (const name of ['auth.json', 'models-store.json']) {
+    const file = join(directory, name)
+    const previous = create.mock.calls.length
+    await writeFile(file + '.replacement', await readFile(file))
+    await rename(file + '.replacement', file)
+    await run(owner)
+    expect(create).toHaveBeenCalledTimes(previous + 1)
+  }
 })
 
 it('retains a failed Pi stream as an attempt without publishing its prefix as a reply', async () => {
