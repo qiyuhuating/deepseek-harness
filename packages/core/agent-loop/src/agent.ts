@@ -458,10 +458,11 @@ export class ReactLoopAgent implements Agent {
         (frame) => this.dispatch.emit('agent/assistant-stream', { frame }),
       )
       let text = ''
+      let outcome: 'completed' | 'max-tokens' | undefined
       live.start()
       live.push({ type: 'block-start', index: 0, blockType: 'text' })
       try {
-        await runPiTurn({
+        outcome = await runPiTurn({
           directory: process.env.DSH_PI_SESSION_DIR,
           id: this.session.id,
           provider: decision.selection.provider,
@@ -503,7 +504,7 @@ export class ReactLoopAgent implements Agent {
         })
       } finally {
         live.push({ type: 'block-end', index: 0, block: { type: 'text', text } })
-        if (text)
+        if (text && (outcome !== undefined || signal.aborted))
           live.settle(
             'assistant/message',
             () =>
@@ -528,7 +529,7 @@ export class ReactLoopAgent implements Agent {
             () => this.session.append('assistant/attempt', { turn, step, stream: live.stream }).seq,
           )
       }
-      return { kind: 'completed' }
+      return { kind: outcome }
     }
     const { assembly } = decision
     let firstAttempt = true

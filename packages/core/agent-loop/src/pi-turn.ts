@@ -21,7 +21,7 @@ export async function runPiTurn(options: {
   text(delta: string): void
   tools: ToolSchema[]
   execute(id: string, name: string, args: unknown): Promise<string>
-}): Promise<void> {
+}): Promise<'completed' | 'max-tokens'> {
   const privateDir = join(options.directory, createHash('sha256').update(options.id).digest('hex'))
   await mkdir(privateDir, { recursive: true, mode: 0o700 })
   const loader = new DefaultResourceLoader({
@@ -76,6 +76,7 @@ export async function runPiTurn(options: {
           ? (last.errorMessage ?? last.stopReason)
           : 'Pi turn ended without an assistant response',
       )
+    return last.stopReason === 'length' ? 'max-tokens' : 'completed'
   } finally {
     options.signal.removeEventListener('abort', abort)
     off()

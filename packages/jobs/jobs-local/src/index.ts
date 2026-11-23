@@ -249,11 +249,11 @@ export class LocalJobRegistry extends JobRegistry {
     }
 
     // The producer uses the same short UUID identity as controls and durable lifecycle records.
-    // Retry a collision while this registry still holds an earlier id.
+    // Reserve ids already present in the live registry or durable history.
     let id: JobId
     do {
       id = brandString<JobId>(`${spec.kind}-${randomUUID().replaceAll('-', '').slice(0, 16)}`)
-    } while (this.store.has(id))
+    } while (this.store.has(id) || (!this.historyError && this.history?.has(id)))
     const toolCall = spec.toolCall === undefined ? undefined : { ...spec.toolCall }
     const ring = new OutputRing()
     const state: ProducerState = { progress: undefined, job: undefined }
