@@ -61,6 +61,43 @@ function send(agent: Agent, text: string) {
   agent.followup(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }))
 }
 
+it('retains a failed Pi stream as an attempt without publishing its prefix as a reply', async () => {
+  vi.stubEnv('DSH_PI_SESSION_DIR', 'unused-by-mocked-pi')
+  onTestFinished(() => { vi.unstubAllEnvs() })
+  const pi = await import('../src/pi-turn.ts')
+  const run = vi.spyOn(pi, 'runPiTurn').mockImplementationOnce(async options => {
+    options.text('incomplete prefix')
+    throw new Error('provider disconnected')
+  })
+  onTestFinished(() => { run.mockRestore() })
+  const ctx = await harness(new MockAdapter([]))
+  onTestFinished(() => ctx.fiber.dispose())
+  const agent = await ctx.agentLoop.create(brandString<SessionId>('pi-stream-error'), { provider: 'mock', model: 'mock' })
+  const idle = waitForIdle(ctx, agent)
+  send(agent, 'go')
+  await idle
+  const events = agent.session.snapshotEvents()
+  expect(run).toHaveBeenCalledOnce()
+  expect(events.some(e => e.type === 'assistant/message')).toBe(false)
+  expect(events.some(e => e.type === 'assistant/attempt')).toBe(true)
+  expect(events.some(e => e.type === 'turn/end' && e.data.reason.kind === 'error')).toBe(true)
+})
+
+it('reports the Pi output limit as the turn end reason', async () => {
+  vi.stubEnv('DSH_PI_SESSION_DIR', 'unused-by-mocked-pi')
+  onTestFinished(() => { vi.unstubAllEnvs() })
+  const pi = await import('../src/pi-turn.ts')
+  const run = vi.spyOn(pi, 'runPiTurn').mockResolvedValueOnce('max-tokens')
+  onTestFinished(() => { run.mockRestore() })
+  const ctx = await harness(new MockAdapter([]))
+  onTestFinished(() => ctx.fiber.dispose())
+  const agent = await ctx.agentLoop.create(brandString<SessionId>('pi-length'), { provider: 'mock', model: 'mock' })
+  const idle = waitForIdle(ctx, agent)
+  send(agent, 'go')
+  await idle
+  expect(agent.session.snapshotEvents().some(e => e.type === 'turn/end' && e.data.reason.kind === 'max-tokens')).toBe(true)
+})
+
 /** The rendered system prompt a request carried as its leading system-role message. */
 function systemOf(request: GenerateOptions | undefined): string | undefined {
   const head = request?.messages[0]

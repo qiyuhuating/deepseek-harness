@@ -546,6 +546,17 @@ export function apply(ctx: Context, config: Config): void {
     presentCall: args => presentJobCall(`Read output from background job ${args.job_id}`, 'read', args.job_id),
   }))
 
+  if (ctx.jobs.historyPage)
+    ctx.tools.register(
+      defineTool({
+        name: 'job_history',
+        description: 'Read a page of durable job summaries; pass nextCursor for older entries.',
+        parameters: { cursor: { type: 'string' }, limit: { type: 'integer' } },
+        output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
+        execute: async ({ cursor, limit }, exec) => ctx.jobs.historyPage!(exec.agent?.id, cursor, limit ?? 50),
+      }),
+    )
+
   ctx.tools.register(defineTool({
     name: 'job_list',
     description: 'List your background jobs (running and finished) with their ids, kinds, and statuses.',

@@ -2333,6 +2333,11 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'fresh projections.',
       },
       {
+        signature: 'historyPage?: (caller: SessionId | undefined, cursor: string | undefined, limit: number) => string',
+        description: 'Durable Axiom history in Pi deployments. Caller identity comes from the tool scope.',
+        parameters: [],
+      },
+      {
         signature: 'abstract get(id: JobId, caller?: SessionId): JobView',
         description: 'Project one job without changing its cursor. Throws for an unknown or foreign job.',
         parameters: [{ name: 'id', description: 'job to look up.' }, { name: 'caller', description: 'reading session checked against the owner.' }],
