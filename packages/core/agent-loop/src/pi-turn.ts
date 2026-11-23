@@ -1,7 +1,7 @@
 /** Model history lives in Pi; the Harness transcript is its UI projection. */
 import { createHash } from 'node:crypto'
-import { mkdir, stat } from 'node:fs/promises'
-import { join } from 'node:path'
+import { mkdir, readdir, stat } from 'node:fs/promises'
+import { basename, join } from 'node:path'
 import {
   createAgentSession,
   DefaultResourceLoader,
@@ -14,16 +14,36 @@ import type { ToolSchema } from '@deepseek-ai/dsh-llm'
 // A Harness agent drives one turn at a time. Keep only its completed model runtime.
 const runtimes = new WeakMap<object, { revision: string; runtime: ModelRuntime }>()
 
+async function fileRevision(path: string): Promise<string | undefined> {
+  try {
+    const file = await stat(path, { bigint: true })
+    return [file.dev, file.ino, file.ctimeNs, file.mtimeNs, file.size].join(',')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw error
+  }
+}
+
+const histories = new WeakMap<object, { directory: string; manager: WeakRef<SessionManager>; revision: string }>()
+
+async function historyRevision(directory: string, manager: SessionManager): Promise<string | undefined> {
+  const path = manager.getSessionFile()
+  if (!path) return undefined
+  try {
+    const [entries, revision] = await Promise.all([readdir(directory), fileRevision(path)])
+    // Another existing JSONL can become the most recent without changing the directory timestamp.
+    const candidates = entries.filter(name => name.endsWith('.jsonl'))
+    return candidates.length === 1 && candidates[0] === basename(path) ? revision : undefined
+  } catch (error) {
+    // An inaccessible cache hint must not turn an already persisted reply into a failed turn.
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ENOENT' || code === 'ENOTDIR' || code === 'EACCES' || code === 'EPERM') return undefined
+    throw error
+  }
+}
+
 async function runtimeFor(owner: object, agentDir: string, signal: AbortSignal): Promise<ModelRuntime> {
-  const revisions = await Promise.all(['models.json', 'auth.json', 'models-store.json'].map(async name => {
-    try {
-      const file = await stat(join(agentDir, name), { bigint: true })
-      return [file.dev, file.ino, file.ctimeNs, file.mtimeNs, file.size].join(',')
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'missing'
-      throw error
-    }
-  }))
+  const revisions = await Promise.all(['models.json', 'auth.json', 'models-store.json'].map(name => fileRevision(join(agentDir, name))))
   signal.throwIfAborted()
   const revision = JSON.stringify([agentDir, process.env.PI_OFFLINE, ...revisions])
   const previous = runtimes.get(owner)
@@ -86,13 +106,21 @@ export async function runPiTurn(options: {
       }
     },
   }))
+  // Reuse only Pi's parsed history. Tool callbacks and abort listeners belong to the new session.
+  const cached = histories.get(options.owner)
+  histories.delete(options.owner)
+  const previous = cached?.manager.deref()
+  const manager = previous && cached?.directory === privateDir && cached.revision === await historyRevision(privateDir, previous)
+    ? previous
+    : SessionManager.continueRecent(privateDir, privateDir)
+  options.signal.throwIfAborted()
   const { session } = await createAgentSession({
     agentDir,
     cwd: privateDir,
     modelRuntime: runtime,
     model,
     resourceLoader: loader,
-    sessionManager: SessionManager.continueRecent(privateDir, privateDir),
+    sessionManager: manager,
     tools: customTools.map((t) => t.name),
     customTools,
   })
@@ -115,6 +143,9 @@ export async function runPiTurn(options: {
           ? (last.errorMessage ?? last.stopReason)
           : 'Pi turn ended without an assistant response',
       )
+    const revision = await historyRevision(privateDir, manager)
+    options.signal.throwIfAborted()
+    if (revision) histories.set(options.owner, { directory: privateDir, manager: new WeakRef(manager), revision })
     return last.stopReason === 'length' ? 'max-tokens' : 'completed'
   } finally {
     options.signal.removeEventListener('abort', abort)
