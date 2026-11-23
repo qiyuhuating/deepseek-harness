@@ -1,7 +1,7 @@
 /** Model history lives in Pi; the Harness transcript is its UI projection. */
 import { createHash } from 'node:crypto'
-import { mkdir, stat } from 'node:fs/promises'
-import { join } from 'node:path'
+import { mkdir, readdir, stat } from 'node:fs/promises'
+import { basename, join } from 'node:path'
 import {
   createAgentSession,
   DefaultResourceLoader,
@@ -29,8 +29,17 @@ const histories = new WeakMap<object, { directory: string; manager: WeakRef<Sess
 async function historyRevision(directory: string, manager: SessionManager): Promise<string | undefined> {
   const path = manager.getSessionFile()
   if (!path) return undefined
-  const [dir, file] = await Promise.all([fileRevision(directory), fileRevision(path)])
-  return dir && file && dir + '/' + file
+  try {
+    const [entries, revision] = await Promise.all([readdir(directory), fileRevision(path)])
+    // Another existing JSONL can become the most recent without changing the directory timestamp.
+    const candidates = entries.filter(name => name.endsWith('.jsonl'))
+    return candidates.length === 1 && candidates[0] === basename(path) ? revision : undefined
+  } catch (error) {
+    // An inaccessible cache hint must not turn an already persisted reply into a failed turn.
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ENOENT' || code === 'ENOTDIR' || code === 'EACCES' || code === 'EPERM') return undefined
+    throw error
+  }
 }
 
 async function runtimeFor(owner: object, agentDir: string, signal: AbortSignal): Promise<ModelRuntime> {

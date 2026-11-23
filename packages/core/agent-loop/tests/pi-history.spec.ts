@@ -1,12 +1,12 @@
 import { once } from 'node:events'
-import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readdir, readFile, rename, rm, utimes, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { expect, it, onTestFinished, vi } from 'vitest'
 import { runPiTurn } from '../src/pi-turn.ts'
 
-it('observes deletion of the active Pi history between warm turns', async () => {
+it('follows Pi history selection after deletion, restore and session switches', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'pi-history-'))
   onTestFinished(() => rm(directory, { recursive: true, force: true }))
   vi.stubEnv('PI_CODING_AGENT_DIR', directory)
@@ -32,7 +32,7 @@ it('observes deletion of the active Pi history between warm turns', async () => 
   } }))
   const owner = {}
   const data = join(directory, 'data')
-  const turn = (prompt: string) => runPiTurn({ owner, directory: data, id: 'main', provider: 'local', model: 'test',
+  const turn = (prompt: string, id = 'main', agent = owner) => runPiTurn({ owner: agent, directory: data, id, provider: 'local', model: 'test',
     prompt, signal: new AbortController().signal, tools: [], execute: vi.fn(), text: vi.fn() })
   await turn('history-marker')
   await turn('before deletion')
@@ -41,8 +41,36 @@ it('observes deletion of the active Pi history between warm turns', async () => 
   const files = await readdir(join(data, id))
   const file = files.find(name => name.endsWith('.jsonl'))
   if (!file) throw Error('Missing Pi history')
-  await rm(join(data, id, file))
+  const active = join(data, id, file)
+  const restored = join(data, id, 'restored.jsonl')
+  await writeFile(restored, (await readFile(active, 'utf8')).replace('history-marker', 'restored-marker'))
+  await utimes(restored, 1, 1)
+  await turn('warm original')
+  expect(messages).toContain('history-marker')
+  const newest = new Date(Date.now() + 10000)
+  await utimes(restored, newest, newest)
+  await turn('continue latest')
+  expect(messages).toContain('restored-marker')
+  expect(messages).not.toContain('history-marker')
+  await turn('private other marker', 'other')
+  expect(messages).not.toContain('restored-marker')
+  await turn('back in main')
+  expect(messages).not.toContain('private other marker')
+  expect(messages).toContain('restored-marker')
+  await turn('reopened', 'main', {})
+  expect(messages).toContain('back in main')
+  await rm(active)
+  await turn('single file hot')
+  const replacement = (await readFile(restored, 'utf8')).replace('restored-marker', 'replaced-marker')
+  await writeFile(restored + '.tmp', replacement)
+  await rename(restored + '.tmp', restored)
+  await turn('after replacement')
+  expect(messages).toContain('replaced-marker')
+  expect(messages).not.toContain('restored-marker')
+  await rm(restored)
   await turn('after deletion')
   expect(messages).toContain('after deletion')
+  expect(messages).not.toContain('replaced-marker')
+  expect(messages).not.toContain('restored-marker')
   expect(messages).not.toContain('history-marker')
 })
